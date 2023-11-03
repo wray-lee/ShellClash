@@ -141,7 +141,7 @@ mark_time(){
 getlanip(){
 	i=1
 	while [ "$i" -le "10" ];do
-		host_ipv4=$(ip a 2>&1 | grep -w 'inet' | grep 'global' | grep 'br' | grep -Ev 'iot|metric' | grep -E ' 1(92|0|72)\.' | sed 's/.*inet.//g' | sed 's/br.*$//g' ) #ipv4局域网网段
+		host_ipv4=$(ip a 2>&1 | grep -w 'inet' | grep 'global' | grep 'br' | grep -Ev 'iot' | grep -E ' 1(92|0|72)\.' | sed 's/.*inet.//g' | sed 's/br.*$//g' | sed 's/metric.*$//g' ) #ipv4局域网网段
 		[ "$ipv6_redir" = "已开启" ] && host_ipv6=$(ip a 2>&1 | grep -w 'inet6' | grep -E 'global' | sed 's/.*inet6.//g' | sed 's/scope.*$//g' ) #ipv6公网地址段
 		[ -f  $TMPDIR/ShellClash_log ] && break
 		[ -n "$host_ipv4" -a -n "$host_ipv6" ] && break
@@ -165,7 +165,7 @@ getyaml(){
 	[ -z "$server_link" ] && server_link=1
 	Server=$(grep -aE '^3|^4' $clashdir/configs/servers.list | sed -n ""$server_link"p" | awk '{print $3}')
 	[ -n "$(echo $Url | grep -oE 'vless:|hysteria:')" ] && Server=$(grep -aE '^4' $clashdir/configs/servers.list | sed -n ""$server_link"p" | awk '{print $3}')
-	[ "$retry" = 4 ] && Server=$(grep -aE '^499' $clashdir/configs/servers.list | awk '{print $3}')
+	[ "$retry" = 4 ] && Server=$(grep -aE '^497' $clashdir/configs/servers.list | awk '{print $3}')
 	Config=$(grep -aE '^5' $clashdir/configs/servers.list | sed -n ""$rule_link"p" | awk '{print $3}')
 	#如果传来的是Url链接则合成Https链接，否则直接使用Https链接
 	if [ -z "$Https" ];then
@@ -346,7 +346,7 @@ store-selected: $restore
 $find_process
 EOF
 	#读取本机hosts并生成配置文件
-	if [ "$hosts_opt" != "未启用" ] && [ -z "$(grep -aE '^hosts:' $clashdir/user.yaml 2>/dev/null)" ];then
+	if [ "$hosts_opt" != "未启用" ] && [ -z "$(grep -aE '^hosts:' $clashdir/yamls/user.yaml 2>/dev/null)" ];then
 		#NTP劫持
 		cat >> $TMPDIR/hosts.yaml <<EOF
 hosts:
@@ -467,6 +467,8 @@ EOF
 	if [ "$?" != 0 ];then
 		logger "$($bindir/clash -t -d $bindir -f $TMPDIR/config.yaml | grep -Eo 'error.*=.*')" 31
 		logger "自定义配置文件校验失败！将使用基础配置文件启动！" 33
+		logger "错误详情请参考 $TMPDIR/error.yaml 文件！" 33
+		mv -f $TMPDIR/config.yaml $TMPDIR/error.yaml &>/dev/null
 		sed -i "/#自定义策略组开始/,/#自定义策略组结束/d"  $TMPDIR/proxy-groups.yaml
 		mv -f $TMPDIR/set_bak.yaml $TMPDIR/set.yaml &>/dev/null
 		#合并基础配置文件
@@ -492,7 +494,8 @@ cn_ip_route(){
 		fi
 	}
 	[ -f $bindir/cn_ip.txt -a -z "$(echo $redir_mod|grep 'Nft')" ] && {
-			echo "create cn_ip hash:net family inet hashsize 1024 maxelem 65536" > $TMPDIR/cn_$USER.ipset
+			# see https://raw.githubusercontent.com/Hackl0us/GeoIP2-CN/release/CN-ip-cidr.txt
+			echo "create cn_ip hash:net family inet hashsize 10240 maxelem 10240" > $TMPDIR/cn_$USER.ipset
 			awk '!/^$/&&!/^#/{printf("add cn_ip %s'" "'\n",$0)}' $bindir/cn_ip.txt >> $TMPDIR/cn_$USER.ipset
 			ipset -! flush cn_ip 2>/dev/null
 			ipset -! restore < $TMPDIR/cn_$USER.ipset 
@@ -511,7 +514,8 @@ cn_ipv6_route(){
 	}
 	[ -f $bindir/cn_ipv6.txt -a -z "$(echo $redir_mod|grep 'Nft')" ] && {
 			#ipv6
-			echo "create cn_ip6 hash:net family inet6 hashsize 1024 maxelem 65536" > $TMPDIR/cn6_$USER.ipset
+			#see https://ispip.clang.cn/all_cn_ipv6.txt
+			echo "create cn_ip6 hash:net family inet6 hashsize 2048 maxelem 2048" > $TMPDIR/cn6_$USER.ipset
 			awk '!/^$/&&!/^#/{printf("add cn_ip6 %s'" "'\n",$0)}' $bindir/cn_ipv6.txt >> $TMPDIR/cn6_$USER.ipset
 			ipset -! flush cn_ip6 2>/dev/null
 			ipset -! restore < $TMPDIR/cn6_$USER.ipset 
@@ -713,6 +717,7 @@ start_output(){
 	#设置dns转发
 	[ "$dns_no" != "已禁用" ] && {
 	iptables -t nat -N clash_dns_out
+	iptables -t nat -A clash_dns_out -m owner --gid-owner 453 -j RETURN #绕过本机dnsmasq
 	iptables -t nat -A clash_dns_out -m owner --gid-owner 7890 -j RETURN
 	iptables -t nat -A clash_dns_out -p udp -s 127.0.0.0/8 -j REDIRECT --to $dns_port
 	iptables -t nat -A OUTPUT -p udp --dport 53 -j clash_dns_out
@@ -878,7 +883,7 @@ start_nft(){
 	[ "$local_proxy" = "已开启" ] && [ "$local_type" = "nftables增强模式" ] && {
 		#dns
 		nft add chain inet shellclash dns_out { type nat hook output priority -100 \; }
-		nft add rule inet shellclash dns_out meta skgid 7890 return && \
+		nft add rule inet shellclash dns_out meta skgid {453,7890} return && \
 		nft add rule inet shellclash dns_out udp dport 53 redirect to $dns_port
 		#output
 		nft add chain inet shellclash output { type nat hook output priority -100 \; }
@@ -1041,7 +1046,7 @@ stop_firewall(){
 #面板配置保存相关
 web_save(){
 	#使用get_save获取面板节点设置
-	get_save http://127.0.0.1:${db_port}/proxies | awk -F ':\\{"' '{for(i=1;i<=NF;i++) print $i}' | grep -aE '^all".*"Selector"' > $TMPDIR/clash_web_check_$USER
+	get_save http://127.0.0.1:${db_port}/proxies | awk -F ':\\{"' '{for(i=1;i<=NF;i++) print $i}' | grep -aE '(^all|^alive)".*"Selector"' > $TMPDIR/clash_web_check_$USER
 	while read line ;do
 		def=$(echo $line | awk -F "[[,]" '{print $2}')
 		now=$(echo $line | grep -oE '"now".*",' | sed 's/"now"://g' | sed 's/"type":.*//g' |  sed 's/,//g')
